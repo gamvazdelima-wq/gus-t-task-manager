@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Calendar, Flag, AlignLeft, Type, CheckCircle2, Tag as TagIcon, Plus } from 'lucide-react';
+import { X, Flag, CheckCircle2, Plus, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import type { Task, TaskPriority, TaskStatus, Category } from '../types';
@@ -15,6 +15,7 @@ interface CreateTaskModalProps {
 export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit }: CreateTaskModalProps) {
     const { user } = useAuth();
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     const [title, setTitle] = useState('');
     const [description, setDescription] = useState('');
@@ -30,6 +31,7 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
 
     useEffect(() => {
         if (isOpen) {
+            setError(null);
             fetchCategories();
             if (taskToEdit) {
                 setTitle(taskToEdit.title);
@@ -53,10 +55,12 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
         setSelectedCategoryIds([]);
         setIsCreatingCategory(false);
         setNewCategoryName('');
+        setError(null);
     };
 
     const fetchCategories = async () => {
-        const { data } = await supabase.from('categories').select('*').order('name');
+        const { data, error } = await supabase.from('categories').select('*').order('name');
+        if (error) console.error("Error fetching categories:", error);
         if (data) setCategories(data as Category[]);
     };
 
@@ -72,18 +76,30 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
     };
 
     const handleCreateCategory = async () => {
-        if (!newCategoryName.trim() || !user) return;
-        const { data, error } = await supabase
-            .from('categories')
-            .insert([{ name: newCategoryName.trim(), user_id: user.id }])
-            .select()
-            .single();
+        if (!newCategoryName.trim()) return;
+        if (!user) {
+            setError("You must be logged in to create categories.");
+            return;
+        }
 
-        if (!error && data) {
-            setCategories([...categories, data as Category]);
-            setSelectedCategoryIds([...selectedCategoryIds, data.id]);
-            setNewCategoryName('');
-            setIsCreatingCategory(false);
+        try {
+            const { data, error } = await supabase
+                .from('categories')
+                .insert([{ name: newCategoryName.trim(), user_id: user.id }])
+                .select()
+                .single();
+
+            if (error) throw error;
+
+            if (data) {
+                setCategories([...categories, data as Category]);
+                setSelectedCategoryIds([...selectedCategoryIds, data.id]);
+                setNewCategoryName('');
+                setIsCreatingCategory(false);
+            }
+        } catch (err: any) {
+            console.error("Error creating category:", err);
+            setError(`Failed to create category: ${err.message}`);
         }
     };
 
@@ -97,18 +113,36 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!user) return;
+        setError(null);
+        console.log("Submitting task form...");
+
+        if (!user) {
+            const msg = 'User session not found. Please reload the page and login again.';
+            console.error(msg);
+            setError(msg);
+            return;
+        }
+
+        if (!title.trim()) {
+            const msg = 'Task title is required.';
+            console.error(msg);
+            setError(msg);
+            return;
+        }
+
         setLoading(true);
 
         try {
             const taskData = {
-                title,
-                description: description || null,
+                title: title.trim(),
+                description: description?.trim() || null,
                 status,
                 priority,
                 due_date: dueDate ? new Date(dueDate).toISOString() : null,
                 user_id: user.id,
             };
+
+            console.log("Task Payload:", taskData);
 
             let taskId = taskToEdit?.id;
 
@@ -124,34 +158,39 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
                     .insert([taskData])
                     .select()
                     .single();
+
                 if (error) throw error;
+                if (!data) throw new Error("No data returned from insert");
                 taskId = data.id;
             }
 
+            console.log("Task ID processed:", taskId);
+
             if (taskId) {
-                // Handle Categories link
-                // First delete existing (easiest for full sync) if editing
+                // Update categories
                 if (taskToEdit) {
                     await supabase.from('task_categories').delete().eq('task_id', taskId);
                 }
 
-                // Insert new
                 if (selectedCategoryIds.length > 0) {
                     const categoryInserts = selectedCategoryIds.map(categoryId => ({
                         task_id: taskId,
                         category_id: categoryId,
                         user_id: user.id
                     }));
-                    await supabase.from('task_categories').insert(categoryInserts);
+                    const { error: catError } = await supabase.from('task_categories').insert(categoryInserts);
+                    if (catError) console.error("Error linking categories:", catError);
                 }
             }
 
+            console.log("Task saved successfully!");
             onSuccess();
             onClose();
             if (!taskToEdit) resetForm();
-        } catch (error) {
-            console.error('Error saving task:', error);
-            alert('Failed to save task');
+
+        } catch (err: any) {
+            console.error('CRITICAL Error saving task:', err);
+            setError(`Error saving task: ${err.message || JSON.stringify(err)}`);
         } finally {
             setLoading(false);
         }
@@ -160,102 +199,115 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm transition-all text-left">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
-                <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 flex-shrink-0">
-                    <h3 className="text-lg font-bold text-slate-800">
-                        {taskToEdit ? 'Edit Task' : 'New Task'}
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm transition-all">
+            <div className="bg-[#FEF7FF] rounded-[28px] shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh] md:max-h-[85vh]">
+                <div className="px-6 py-4 flex justify-between items-center shrink-0">
+                    <h3 className="text-2xl font-normal text-[#1D1B20]">
+                        {taskToEdit ? 'Edit task' : 'New task'}
                     </h3>
-                    <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200 transition-colors text-slate-500">
-                        <X className="w-5 h-5" />
+                    <button onClick={onClose} className="p-2 rounded-full hover:bg-[#E6E0E9] transition-colors text-[#49454F]">
+                        <X className="w-6 h-6" />
                     </button>
                 </div>
 
-                <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-5">
-                    <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-2">
-                            <Type className="w-4 h-4 text-slate-400" /> Title
-                        </label>
+                {error && (
+                    <div className="mx-6 mb-4 p-3 bg-red-100 border border-red-200 text-red-700 text-sm rounded-lg flex items-start gap-2">
+                        <AlertCircle className="w-5 h-5 shrink-0" />
+                        <span>{error}</span>
+                    </div>
+                )}
+
+                <form id="task-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 pb-6 space-y-6">
+                    <div className="relative">
                         <input
                             type="text"
                             required
                             value={title}
                             onChange={(e) => setTitle(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all font-medium"
-                            placeholder="What needs to be done?"
+                            className="peer w-full px-4 pt-6 pb-2 bg-[#Ece6f0] border-b-2 border-[#79747E] rounded-t-lg text-[#1D1B20] placeholder-transparent focus:outline-none focus:border-[#6750A4] transition-all"
+                            placeholder="Title"
+                            id="task-title"
                         />
+                        <label htmlFor="task-title" className="absolute left-4 top-2 text-xs text-[#6750A4] transition-all peer-placeholder-shown:text-base peer-placeholder-shown:text-[#49454F] peer-placeholder-shown:top-4 peer-focus:top-2 peer-focus:text-xs peer-focus:text-[#6750A4]">
+                            Task Title
+                        </label>
                     </div>
 
-                    <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-2">
-                            <AlignLeft className="w-4 h-4 text-slate-400" /> Description
-                        </label>
+                    <div className="relative">
                         <textarea
                             rows={3}
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all resize-none"
-                            placeholder="Add details..."
+                            className="peer w-full px-4 pt-6 pb-2 bg-[#Ece6f0] border-b-2 border-[#79747E] rounded-t-lg text-[#1D1B20] placeholder-transparent focus:outline-none focus:border-[#6750A4] transition-all resize-none"
+                            placeholder="Description"
+                            id="task-desc"
                         />
+                        <label htmlFor="task-desc" className="absolute left-4 top-2 text-xs text-[#6750A4] transition-all peer-placeholder-shown:text-base peer-placeholder-shown:text-[#49454F] peer-placeholder-shown:top-4 peer-focus:top-2 peer-focus:text-xs peer-focus:text-[#6750A4]">
+                            Description
+                        </label>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-2">
-                                <CheckCircle2 className="w-4 h-4 text-slate-400" /> Status
-                            </label>
-                            <select
-                                value={status}
-                                onChange={(e) => setStatus(e.target.value as TaskStatus)}
-                                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
-                            >
-                                <option value="pending">To Do</option>
-                                <option value="in_progress">In Progress</option>
-                                <option value="completed">Done</option>
-                                <option value="cancelled">Cancelled</option>
-                            </select>
+                            <label className="block text-xs font-medium text-[#49454F] mb-1 ml-1">Status</label>
+                            <div className="relative">
+                                <select
+                                    value={status}
+                                    onChange={(e) => setStatus(e.target.value as TaskStatus)}
+                                    className="w-full pl-3 pr-8 py-3 bg-[#F3EDF7] border border-[#79747E] rounded-lg text-[#1D1B20] focus:outline-none focus:ring-2 focus:ring-[#6750A4] appearance-none"
+                                >
+                                    <option value="pending">To Do</option>
+                                    <option value="in_progress">In Progress</option>
+                                    <option value="completed">Done</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                    <CheckCircle2 className="w-4 h-4 text-[#49454F]" />
+                                </div>
+                            </div>
                         </div>
 
                         <div>
-                            <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-2">
-                                <Flag className="w-4 h-4 text-slate-400" /> Priority
-                            </label>
-                            <select
-                                value={priority}
-                                onChange={(e) => setPriority(e.target.value as TaskPriority)}
-                                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
-                            >
-                                <option value="low">Low</option>
-                                <option value="medium">Medium</option>
-                                <option value="high">High</option>
-                                <option value="urgent">Urgent</option>
-                            </select>
+                            <label className="block text-xs font-medium text-[#49454F] mb-1 ml-1">Priority</label>
+                            <div className="relative">
+                                <select
+                                    value={priority}
+                                    onChange={(e) => setPriority(e.target.value as TaskPriority)}
+                                    className="w-full pl-3 pr-8 py-3 bg-[#F3EDF7] border border-[#79747E] rounded-lg text-[#1D1B20] focus:outline-none focus:ring-2 focus:ring-[#6750A4] appearance-none"
+                                >
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High</option>
+                                    <option value="urgent">Urgent</option>
+                                </select>
+                                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                    <Flag className="w-4 h-4 text-[#49454F]" />
+                                </div>
+                            </div>
                         </div>
                     </div>
 
                     <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1.5 flex items-center gap-2">
-                            <Calendar className="w-4 h-4 text-slate-400" /> Due Date
-                        </label>
+                        <label className="block text-xs font-medium text-[#49454F] mb-1 ml-1">Due Date</label>
                         <input
                             type="date"
                             value={dueDate}
                             onChange={(e) => setDueDate(e.target.value)}
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all"
+                            className="w-full px-4 py-3 bg-[#F3EDF7] border border-[#79747E] rounded-lg text-[#1D1B20] focus:outline-none focus:ring-2 focus:ring-[#6750A4]"
                             style={{ colorScheme: 'light' }}
                         />
                     </div>
 
                     {/* Categories Section */}
-                    <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center justify-between">
-                            <span className="flex items-center gap-2"><TagIcon className="w-4 h-4 text-slate-400" /> Categories</span>
+                    <div className="bg-[#F3EDF7] p-4 rounded-xl">
+                        <label className="block text-sm font-medium text-[#49454F] mb-3 flex items-center justify-between">
+                            <span className="flex items-center gap-2">Categories</span>
                             <button
                                 type="button"
                                 onClick={() => setIsCreatingCategory(!isCreatingCategory)}
-                                className="text-xs text-indigo-600 hover:text-indigo-700 font-medium flex items-center gap-1"
+                                className="text-xs text-[#6750A4] font-bold uppercase tracking-wide flex items-center gap-1 hover:bg-[#E8DEF8] px-2 py-1 rounded"
                             >
-                                <Plus className="w-3 h-3" /> New Category
+                                <Plus className="w-3 h-3" /> New
                             </button>
                         </label>
 
@@ -265,16 +317,16 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
                                     type="text"
                                     value={newCategoryName}
                                     onChange={(e) => setNewCategoryName(e.target.value)}
-                                    className="flex-1 px-3 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                                    className="flex-1 px-3 py-2 text-sm bg-white border border-[#79747E] rounded-lg focus:outline-none focus:border-[#6750A4]"
                                     placeholder="Category Name"
                                     onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleCreateCategory())}
                                 />
                                 <button
                                     type="button"
                                     onClick={handleCreateCategory}
-                                    className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-colors"
+                                    className="px-4 py-2 bg-[#6750A4] text-white text-xs font-bold rounded-lg hover:bg-[#6750A4]/90 transition-colors"
                                 >
-                                    Add
+                                    ADD
                                 </button>
                             </div>
                         )}
@@ -286,37 +338,34 @@ export default function CreateTaskModal({ isOpen, onClose, onSuccess, taskToEdit
                                     type="button"
                                     onClick={() => toggleCategory(cat.id)}
                                     className={cn(
-                                        "px-3 py-1 rounded-full text-xs font-medium border transition-all cursor-pointer select-none",
+                                        "px-3 py-1 rounded-lg text-sm font-medium border transition-all cursor-pointer select-none",
                                         selectedCategoryIds.includes(cat.id)
-                                            ? "bg-indigo-100 text-indigo-700 border-indigo-200 shadow-sm"
-                                            : "bg-white text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600"
+                                            ? "bg-[#E8DEF8] text-[#1D192B] border-[#E8DEF8]"
+                                            : "bg-transparent text-[#49454F] border-[#79747E]"
                                     )}
                                 >
                                     {cat.name}
                                 </button>
                             ))}
-                            {categories.length === 0 && !isCreatingCategory && (
-                                <span className="text-xs text-slate-400 italic">No categories yet. Create one!</span>
-                            )}
                         </div>
                     </div>
                 </form>
 
-                <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-50 bg-slate-50/50 flex-shrink-0">
+                <div className="flex justify-end gap-2 px-6 py-4 shrink-0">
                     <button
                         type="button"
                         onClick={onClose}
-                        className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
+                        className="px-5 py-2.5 text-sm font-medium text-[#6750A4] hover:bg-[#E8DEF8]/50 rounded-full transition-colors"
                     >
                         Cancel
                     </button>
                     <button
                         type="submit"
+                        form="task-form"
                         disabled={loading}
-                        onClick={handleSubmit}
-                        className="px-6 py-2 text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-md hover:shadow-lg transition-all focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-70 disabled:cursor-not-allowed"
+                        className="px-6 py-2.5 text-sm font-medium text-white bg-[#6750A4] hover:bg-[#6750A4]/90 rounded-full shadow-md transition-all disabled:opacity-70 disabled:cursor-not-allowed"
                     >
-                        {loading ? 'Saving...' : 'Save Task'}
+                        {loading ? 'Saving...' : 'Save'}
                     </button>
                 </div>
             </div>
